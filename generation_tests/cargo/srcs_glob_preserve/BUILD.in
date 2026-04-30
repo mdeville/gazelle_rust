@@ -1,0 +1,10 @@
+# gazelle:rust_mode generate_from_cargo
+# gazelle:rust_srcs_glob true
+
+rust_library(
+    name = "srcs_glob_lib",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs", "src/other_excluded_file.rs"],
+    ),
+)

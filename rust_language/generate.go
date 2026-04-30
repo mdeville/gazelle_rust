@@ -53,31 +53,55 @@ func getCommonPrefix(srcs []string) string {
 // Returns the glob expression as a rule.GlobValue.
 // If hasMainRs is true, excludes the top-level main.rs file since that should only
 // appear in rust_binary targets.
-func createGlobExpr(srcs []string, hasMainRs bool) rule.GlobValue {
+// Any preservedExcludes are merged into the result, deduplicated and sorted, so
+// user-authored excludes survive regeneration.
+func createGlobExpr(srcs []string, hasMainRs bool, preservedExcludes []string) rule.GlobValue {
 	prefix := getCommonPrefix(srcs)
-	var pattern string
-
+	pattern := "**/*.rs"
 	if prefix != "" {
 		pattern = prefix + "/**/*.rs"
-	} else {
-		pattern = "**/*.rs"
 	}
 
-	globValue := rule.GlobValue{
-		Patterns: []string{pattern},
+	excludes := map[string]bool{}
+	for _, e := range preservedExcludes {
+		excludes[e] = true
 	}
-
 	if hasMainRs {
-		var excludePattern string
 		if prefix != "" {
-			excludePattern = prefix + "/main.rs"
+			excludes[prefix+"/main.rs"] = true
 		} else {
-			excludePattern = "main.rs"
+			excludes["main.rs"] = true
 		}
-		globValue.Excludes = []string{excludePattern}
 	}
 
+	globValue := rule.GlobValue{Patterns: []string{pattern}}
+	if len(excludes) > 0 {
+		globValue.Excludes = setToSortedVector(excludes)
+	}
 	return globValue
+}
+
+// existingGlobExcludes returns the exclude patterns from `srcs = glob(...)` of
+// the rule named ruleName in the current BUILD file, or nil if the rule does
+// not exist or its srcs is not a glob expression.
+func existingGlobExcludes(args *language.GenerateArgs, ruleName string) []string {
+	if args.File == nil {
+		return nil
+	}
+	for _, r := range args.File.Rules {
+		if r.Name() != ruleName {
+			continue
+		}
+		srcs := r.Attr("srcs")
+		if srcs == nil {
+			return nil
+		}
+		if glob, ok := rule.ParseGlobExpr(srcs); ok {
+			return glob.Excludes
+		}
+		return nil
+	}
+	return nil
 }
 
 func (l *rustLang) isTestDir(dirname *string) bool {
@@ -522,7 +546,9 @@ func (l *rustLang) generateRulesFromCargo(args language.GenerateArgs) language.G
 
 		for _, existingRule := range args.File.Rules {
 			if generatedRuleNames[existingRule.Name()] {
-				// Remove the srcs attribute so our glob can replace it without conflict
+				// Remove the srcs attribute so our glob can replace it without conflict.
+				// Preserved excludes were already read from the existing rule earlier in
+				// generateCargoRule, before this DelAttr clears it.
 				existingRule.DelAttr("srcs")
 			}
 		}
@@ -534,7 +560,8 @@ func (l *rustLang) generateRulesFromCargo(args language.GenerateArgs) language.G
 func (l *rustLang) generateCargoRule(c *config.Config, args *language.GenerateArgs,
 	crateInfo *pb.CargoCrateInfo, kind string, suffix string, tags []string,
 	hasBuildScript bool, hasMainRs bool, parentCrateName string, parentCrateEdition string,
-	enabledFeatures []string, dependencyAliases map[string]string, result *language.GenerateResult) {
+	enabledFeatures []string, dependencyAliases map[string]string,
+	result *language.GenerateResult) {
 
 	targetName := crateInfo.Name + suffix
 	crateName := crateInfo.Name
@@ -578,10 +605,10 @@ func (l *rustLang) generateCargoRule(c *config.Config, args *language.GenerateAr
 
 	if len(srcs) > 0 {
 		cfg := l.GetConfig(args.Config)
-		// Only use glob for rust_library targets (including rust_proc_macro)
+		// Only use glob for rust_library targets (including rust_proc_macro).
 		if cfg.SrcsGlob && (kind == "rust_library" || kind == "rust_proc_macro") {
-			// Use glob expression instead of listing files explicitly
-			newRule.SetAttr("srcs", createGlobExpr(srcs, hasMainRs))
+			preservedExcludes := existingGlobExcludes(args, targetName)
+			newRule.SetAttr("srcs", createGlobExpr(srcs, hasMainRs, preservedExcludes))
 		} else {
 			newRule.SetAttr("srcs", srcs)
 		}
